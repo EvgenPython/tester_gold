@@ -1,0 +1,30 @@
+{
+  "ema": {
+    "fast_period": 50,
+    "slow_period": 200
+  },
+
+  "macd": {
+    "fast_period": 12,
+    "slow_period": 26,
+    "signal_period": 9
+  },
+
+  "atr": {
+    "period": 14
+  },
+
+  "scoring": {
+    "min_score": 75
+  },
+
+  "filters": {
+    "distance_from_ema_atr_multiplier": 1.2,
+    "max_stop_atr_multiplier": 2.0
+  },
+
+  "tp": {
+    "tp1_rr": 1.0,
+    "tp2_rr": 2.0
+  }
+}
