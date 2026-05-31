@@ -15,7 +15,7 @@ TIMEFRAMES = {
 }
 
 START_DATE = datetime(2024, 3, 1)
-END_DATE = datetime(2026, 5, 1)
+END_DATE = datetime(2026, 5, 31)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"

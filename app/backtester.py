@@ -107,12 +107,20 @@ class Backtester:
 
         risk = abs(entry_price - stop_loss)
 
+        tp_settings = self.strategy_settings.get("tp", {})
+
+        tp1_rr = tp_settings.get("tp1_rr", 1.0)
+        tp2_rr = tp_settings.get("tp2_rr", 2.0)
+        tp3_rr = tp_settings.get("tp3_rr", 3.0)
+
         if direction == "BUY":
-            tp1 = entry_price + risk
-            tp2 = entry_price + risk * 2
+            tp1 = entry_price + risk * tp1_rr
+            tp2 = entry_price + risk * tp2_rr
+            tp3 = entry_price + risk * tp3_rr
         else:
-            tp1 = entry_price - risk
-            tp2 = entry_price - risk * 2
+            tp1 = entry_price - risk * tp1_rr
+            tp2 = entry_price - risk * tp2_rr
+            tp3 = entry_price - risk * tp3_rr
 
         self.open_trade = {
             "direction": direction,
@@ -122,11 +130,24 @@ class Backtester:
             "stop_loss": stop_loss,
             "tp1": tp1,
             "tp2": tp2,
+            "tp3": tp3,
             "risk_percent": self.backtest_settings["risk_percent"],
             "score": signal.score,
             "reasons": signal.reasons,
+
             "breakeven_active": False,
             "breakeven_time": None,
+
+            "tp1_hit": False,
+            "tp1_time": None,
+
+            "tp2_hit": False,
+            "tp2_time": None,
+
+            "tp3_hit": False,
+            "tp3_time": None,
+
+            "max_profit_lock_level": 0,
             "candles_in_trade": 0,
         }
 
@@ -138,6 +159,7 @@ class Backtester:
         print(f"sl: {stop_loss}")
         print(f"tp1: {tp1}")
         print(f"tp2: {tp2}")
+        print(f"tp3: {tp3}")
         print(f"score: {signal.score}")
 
     def _is_valid_signal(
@@ -185,20 +207,63 @@ class Backtester:
         stop_loss = trade["stop_loss"]
         tp1 = trade["tp1"]
         tp2 = trade["tp2"]
+        tp3 = trade["tp3"]
 
         if direction == "BUY":
             if low <= stop_loss:
                 self.close_trade(
                     close_price=stop_loss,
-                    reason="BREAKEVEN" if trade["breakeven_active"] else "STOP LOSS",
+                    reason=self._get_stop_close_reason(trade),
                     candle=candle,
                 )
                 return
 
-            if high >= tp1 and not trade["breakeven_active"]:
+            if high >= tp1 and not trade["tp1_hit"]:
                 trade["stop_loss"] = trade["entry_price"]
                 trade["breakeven_active"] = True
                 trade["breakeven_time"] = candle["time"]
+                trade["tp1_hit"] = True
+                trade["tp1_time"] = candle["time"]
+                trade["max_profit_lock_level"] = max(
+                    trade["max_profit_lock_level"],
+                    0,
+                )
+
+                print("=" * 50)
+                print("TP1 HIT")
+                print(f"time: {candle['time']}")
+                print(f"direction: {direction}")
+                print("SL moved to ENTRY")
+
+            if high >= tp2 and not trade["tp2_hit"]:
+                trade["stop_loss"] = tp1
+                trade["tp2_hit"] = True
+                trade["tp2_time"] = candle["time"]
+                trade["max_profit_lock_level"] = max(
+                    trade["max_profit_lock_level"],
+                    1,
+                )
+
+                print("=" * 50)
+                print("TP2 HIT")
+                print(f"time: {candle['time']}")
+                print(f"direction: {direction}")
+                print("SL moved to TP1")
+
+            if high >= tp3 and not trade["tp3_hit"]:
+                trade["stop_loss"] = tp2
+                trade["tp3_hit"] = True
+                trade["tp3_time"] = candle["time"]
+                trade["max_profit_lock_level"] = max(
+                    trade["max_profit_lock_level"],
+                    2,
+                )
+
+                print("=" * 50)
+                print("TP3 HIT")
+                print(f"time: {candle['time']}")
+                print(f"direction: {direction}")
+                print("SL moved to TP2")
 
             if should_exit_trade(
                 direction=direction,
@@ -209,14 +274,6 @@ class Backtester:
                 self.close_trade(
                     close_price=close,
                     reason="EXIT SIGNAL",
-                    candle=candle,
-                )
-                return
-
-            if high >= tp2:
-                self.close_trade(
-                    close_price=tp2,
-                    reason="TP2",
                     candle=candle,
                 )
                 return
@@ -225,15 +282,57 @@ class Backtester:
             if high >= stop_loss:
                 self.close_trade(
                     close_price=stop_loss,
-                    reason="BREAKEVEN" if trade["breakeven_active"] else "STOP LOSS",
+                    reason=self._get_stop_close_reason(trade),
                     candle=candle,
                 )
                 return
 
-            if low <= tp1 and not trade["breakeven_active"]:
+            if low <= tp1 and not trade["tp1_hit"]:
                 trade["stop_loss"] = trade["entry_price"]
                 trade["breakeven_active"] = True
                 trade["breakeven_time"] = candle["time"]
+                trade["tp1_hit"] = True
+                trade["tp1_time"] = candle["time"]
+                trade["max_profit_lock_level"] = max(
+                    trade["max_profit_lock_level"],
+                    0,
+                )
+
+                print("=" * 50)
+                print("TP1 HIT")
+                print(f"time: {candle['time']}")
+                print(f"direction: {direction}")
+                print("SL moved to ENTRY")
+
+            if low <= tp2 and not trade["tp2_hit"]:
+                trade["stop_loss"] = tp1
+                trade["tp2_hit"] = True
+                trade["tp2_time"] = candle["time"]
+                trade["max_profit_lock_level"] = max(
+                    trade["max_profit_lock_level"],
+                    1,
+                )
+
+                print("=" * 50)
+                print("TP2 HIT")
+                print(f"time: {candle['time']}")
+                print(f"direction: {direction}")
+                print("SL moved to TP1")
+
+            if low <= tp3 and not trade["tp3_hit"]:
+                trade["stop_loss"] = tp2
+                trade["tp3_hit"] = True
+                trade["tp3_time"] = candle["time"]
+                trade["max_profit_lock_level"] = max(
+                    trade["max_profit_lock_level"],
+                    2,
+                )
+
+                print("=" * 50)
+                print("TP3 HIT")
+                print(f"time: {candle['time']}")
+                print(f"direction: {direction}")
+                print("SL moved to TP2")
 
             if should_exit_trade(
                 direction=direction,
@@ -248,13 +347,20 @@ class Backtester:
                 )
                 return
 
-            if low <= tp2:
-                self.close_trade(
-                    close_price=tp2,
-                    reason="TP2",
-                    candle=candle,
-                )
-                return
+    def _get_stop_close_reason(
+        self,
+        trade,
+    ) -> str:
+        if trade["max_profit_lock_level"] >= 2:
+            return "PROFIT LOCK TP2"
+
+        if trade["max_profit_lock_level"] >= 1:
+            return "PROFIT LOCK TP1"
+
+        if trade["breakeven_active"]:
+            return "BREAKEVEN"
+
+        return "STOP LOSS"
 
     def close_trade(
         self,
