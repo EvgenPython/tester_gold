@@ -14,8 +14,8 @@ TIMEFRAMES = {
     "H4": mt5.TIMEFRAME_H4,
 }
 
-START_DATE = datetime(2024, 3, 1)
-END_DATE = datetime(2026, 5, 31)
+START_DATE = datetime(2024, 1, 1)
+END_DATE = datetime(2026, 6, 6)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"

@@ -7,6 +7,11 @@ from app.risk import (
     calculate_rr,
     calculate_result_percent,
 )
+from app.liquidity import (
+    analyze_liquidity,
+    describe_liquidity,
+    format_liquidity_level,
+)
 
 
 class Backtester:
@@ -33,6 +38,9 @@ class Backtester:
 
         self.equity_curve = [self.balance]
         self.max_drawdown = 0
+
+        self.blocked_by_liquidity = 0
+        self.blocked_by_stop_distance = 0
 
     def run(self):
         print("\nBACKTEST STARTED\n")
@@ -71,9 +79,30 @@ class Backtester:
             if signal.action == SignalAction.WAIT:
                 continue
 
+            liquidity = analyze_liquidity(
+                df=h1_past,
+                lookback=150,
+            )
+
+            if self._liquidity_filter_blocks_signal(
+                signal=signal,
+                liquidity=liquidity,
+                h1_past=h1_past,
+            ):
+                self.blocked_by_liquidity += 1
+                continue
+
+            if self._stop_distance_filter_blocks_signal(
+                signal=signal,
+                h1_past=h1_past,
+            ):
+                self.blocked_by_stop_distance += 1
+                continue
+
             self.open_position(
                 signal=signal,
                 current_time=current_time,
+                liquidity=liquidity,
             )
 
         if self.open_trade is not None:
@@ -86,13 +115,100 @@ class Backtester:
             )
 
         print("\nBACKTEST FINISHED\n")
+        print(f"Blocked by liquidity filter: {self.blocked_by_liquidity}")
+        print(f"Blocked by stop distance filter: {self.blocked_by_stop_distance}")
 
         self.export_trades_csv()
+
+    def _liquidity_filter_blocks_signal(
+        self,
+        signal,
+        liquidity,
+        h1_past,
+    ) -> bool:
+        if liquidity is None:
+            return False
+
+        current_price = float(signal.entry_price)
+        atr = float(h1_past["atr"].iloc[-1])
+
+        max_distance_atr = 0.5
+        max_distance = atr * max_distance_atr
+
+        if signal.action == SignalAction.SELL:
+            level = liquidity.nearest_low_below
+
+            if level is None:
+                return False
+
+            distance = current_price - level.zone_high
+
+            if distance < 0:
+                return False
+
+            if distance <= max_distance:
+                print("=" * 50)
+                print("LIQUIDITY FILTER BLOCKED SELL")
+                print(f"entry: {current_price}")
+                print(f"nearest_low_below: {format_liquidity_level(level)}")
+                print(f"distance: {distance:.2f}")
+                print(f"max allowed: {max_distance:.2f}")
+                return True
+
+        if signal.action == SignalAction.BUY:
+            level = liquidity.nearest_high_above
+
+            if level is None:
+                return False
+
+            distance = level.zone_low - current_price
+
+            if distance < 0:
+                return False
+
+            if distance <= max_distance:
+                print("=" * 50)
+                print("LIQUIDITY FILTER BLOCKED BUY")
+                print(f"entry: {current_price}")
+                print(f"nearest_high_above: {format_liquidity_level(level)}")
+                print(f"distance: {distance:.2f}")
+                print(f"max allowed: {max_distance:.2f}")
+                return True
+
+        return False
+
+    def _stop_distance_filter_blocks_signal(
+        self,
+        signal,
+        h1_past,
+    ) -> bool:
+        entry_price = float(signal.entry_price)
+        stop_loss = float(signal.stop_loss)
+        atr = float(h1_past["atr"].iloc[-1])
+
+        stop_distance = abs(entry_price - stop_loss)
+
+        min_stop_atr = 0
+        min_stop_distance = atr * min_stop_atr
+
+        if stop_distance < min_stop_distance:
+            print("=" * 50)
+            print("STOP DISTANCE FILTER BLOCKED TRADE")
+            print(f"direction: {signal.action.value}")
+            print(f"entry: {entry_price}")
+            print(f"stop_loss: {stop_loss}")
+            print(f"stop_distance: {stop_distance:.2f}")
+            print(f"min_stop_distance: {min_stop_distance:.2f}")
+            print(f"atr: {atr:.2f}")
+            return True
+
+        return False
 
     def open_position(
         self,
         signal,
         current_time,
+        liquidity=None,
     ):
         direction = signal.action.value
         entry_price = float(signal.entry_price)
@@ -122,6 +238,16 @@ class Backtester:
             tp2 = entry_price - risk * tp2_rr
             tp3 = entry_price - risk * tp3_rr
 
+        if liquidity:
+            liquidity_info = describe_liquidity(liquidity)
+        else:
+            liquidity_info = {
+                "nearest_high_above": "None",
+                "nearest_high_below": "None",
+                "nearest_low_above": "None",
+                "nearest_low_below": "None",
+            }
+
         self.open_trade = {
             "direction": direction,
             "open_time": current_time,
@@ -134,6 +260,11 @@ class Backtester:
             "risk_percent": self.backtest_settings["risk_percent"],
             "score": signal.score,
             "reasons": signal.reasons,
+
+            "nearest_high_above": liquidity_info["nearest_high_above"],
+            "nearest_high_below": liquidity_info["nearest_high_below"],
+            "nearest_low_above": liquidity_info["nearest_low_above"],
+            "nearest_low_below": liquidity_info["nearest_low_below"],
 
             "breakeven_active": False,
             "breakeven_time": None,
@@ -161,6 +292,10 @@ class Backtester:
         print(f"tp2: {tp2}")
         print(f"tp3: {tp3}")
         print(f"score: {signal.score}")
+        print(f"nearest_high_above: {liquidity_info['nearest_high_above']}")
+        print(f"nearest_high_below: {liquidity_info['nearest_high_below']}")
+        print(f"nearest_low_above: {liquidity_info['nearest_low_above']}")
+        print(f"nearest_low_below: {liquidity_info['nearest_low_below']}")
 
     def _is_valid_signal(
         self,
