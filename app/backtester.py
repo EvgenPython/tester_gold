@@ -15,6 +15,73 @@ from app.liquidity import (
 
 
 class Backtester:
+    TRADE_FIELDNAMES = [
+        "direction",
+        "open_time",
+        "entry_price",
+        "initial_stop_loss",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "tp3",
+        "risk_percent",
+        "score",
+        "reasons",
+
+        "nearest_high_above",
+        "nearest_high_below",
+        "nearest_low_above",
+        "nearest_low_below",
+
+        "breakeven_active",
+        "breakeven_time",
+
+        "tp1_hit",
+        "tp1_time",
+
+        "tp2_hit",
+        "tp2_time",
+
+        "tp3_hit",
+        "tp3_time",
+
+        "max_profit_lock_level",
+        "candles_in_trade",
+
+        "close_time",
+        "close_price",
+        "close_reason",
+        "rr",
+        "result_percent",
+        "balance_before",
+        "balance_after",
+    ]
+
+    NUMERIC_FIELDS = {
+        "entry_price",
+        "initial_stop_loss",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "tp3",
+        "risk_percent",
+        "score",
+        "max_profit_lock_level",
+        "candles_in_trade",
+        "close_price",
+        "rr",
+        "result_percent",
+        "balance_before",
+        "balance_after",
+    }
+
+    BOOLEAN_FIELDS = {
+        "breakeven_active",
+        "tp1_hit",
+        "tp2_hit",
+        "tp3_hit",
+    }
+
     def __init__(
         self,
         h4,
@@ -33,7 +100,6 @@ class Backtester:
         self.initial_balance = backtest_settings["initial_balance"]
         self.balance = self.initial_balance
 
-        self.trades = []
         self.open_trade = None
 
         self.equity_curve = [self.balance]
@@ -41,6 +107,108 @@ class Backtester:
 
         self.blocked_by_liquidity = 0
         self.blocked_by_stop_distance = 0
+        self.blocked_by_max_score = 0
+
+        self.trade_count = 0
+        self._trades_cache = None
+
+        self.results_dir = Path(__file__).resolve().parent.parent / "results"
+        self.trades_file_path = self.results_dir / "trades.csv"
+
+        self._init_trades_csv()
+
+    @property
+    def trades(self):
+        """
+        Совместимость с main.py.
+
+        Во время теста сделки не хранятся в памяти.
+        Если main.py после теста обращается к backtester.trades,
+        данные будут прочитаны из CSV.
+        """
+        if self._trades_cache is None:
+            self._trades_cache = self._load_trades_from_csv()
+
+        return self._trades_cache
+
+    def _init_trades_csv(self):
+        self.results_dir.mkdir(exist_ok=True)
+
+        with open(
+            self.trades_file_path,
+            "w",
+            newline="",
+            encoding="utf-8-sig",
+        ) as csvfile:
+            writer = csv.DictWriter(
+                csvfile,
+                fieldnames=self.TRADE_FIELDNAMES,
+            )
+            writer.writeheader()
+
+        print(f"Trades CSV initialized: {self.trades_file_path}")
+
+    def _append_trade_to_csv(self, trade: dict):
+        row = {}
+
+        for field in self.TRADE_FIELDNAMES:
+            row[field] = trade.get(field, "")
+
+        with open(
+            self.trades_file_path,
+            "a",
+            newline="",
+            encoding="utf-8-sig",
+        ) as csvfile:
+            writer = csv.DictWriter(
+                csvfile,
+                fieldnames=self.TRADE_FIELDNAMES,
+            )
+            writer.writerow(row)
+
+        self.trade_count += 1
+
+    def _load_trades_from_csv(self):
+        if not self.trades_file_path.exists():
+            return []
+
+        trades = []
+
+        with open(
+            self.trades_file_path,
+            "r",
+            newline="",
+            encoding="utf-8-sig",
+        ) as csvfile:
+            reader = csv.DictReader(csvfile)
+
+            for row in reader:
+                trade = {}
+
+                for key, value in row.items():
+                    if value == "":
+                        trade[key] = None
+                        continue
+
+                    if key in self.NUMERIC_FIELDS:
+                        try:
+                            if key in {"score", "max_profit_lock_level", "candles_in_trade"}:
+                                trade[key] = int(float(value))
+                            else:
+                                trade[key] = float(value)
+                        except ValueError:
+                            trade[key] = value
+                        continue
+
+                    if key in self.BOOLEAN_FIELDS:
+                        trade[key] = value == "True"
+                        continue
+
+                    trade[key] = value
+
+                trades.append(trade)
+
+        return trades
 
     def run(self):
         print("\nBACKTEST STARTED\n")
@@ -77,6 +245,11 @@ class Backtester:
             )
 
             if signal.action == SignalAction.WAIT:
+                continue
+
+            # Experimental max score filter
+            if signal.score > 90:
+                self.blocked_by_max_score += 1
                 continue
 
             liquidity = analyze_liquidity(
@@ -117,8 +290,9 @@ class Backtester:
         print("\nBACKTEST FINISHED\n")
         print(f"Blocked by liquidity filter: {self.blocked_by_liquidity}")
         print(f"Blocked by stop distance filter: {self.blocked_by_stop_distance}")
-
-        self.export_trades_csv()
+        print(f"Blocked by max score filter: {self.blocked_by_max_score}")
+        print(f"Trades exported: {self.trade_count}")
+        print(f"Trades CSV path: {self.trades_file_path}")
 
     def _liquidity_filter_blocks_signal(
         self,
@@ -359,10 +533,7 @@ class Backtester:
                 trade["breakeven_time"] = candle["time"]
                 trade["tp1_hit"] = True
                 trade["tp1_time"] = candle["time"]
-                trade["max_profit_lock_level"] = max(
-                    trade["max_profit_lock_level"],
-                    0,
-                )
+                trade["max_profit_lock_level"] = max(trade["max_profit_lock_level"], 0)
 
                 print("=" * 50)
                 print("TP1 HIT")
@@ -374,10 +545,7 @@ class Backtester:
                 trade["stop_loss"] = tp1
                 trade["tp2_hit"] = True
                 trade["tp2_time"] = candle["time"]
-                trade["max_profit_lock_level"] = max(
-                    trade["max_profit_lock_level"],
-                    1,
-                )
+                trade["max_profit_lock_level"] = max(trade["max_profit_lock_level"], 1)
 
                 print("=" * 50)
                 print("TP2 HIT")
@@ -389,10 +557,7 @@ class Backtester:
                 trade["stop_loss"] = tp2
                 trade["tp3_hit"] = True
                 trade["tp3_time"] = candle["time"]
-                trade["max_profit_lock_level"] = max(
-                    trade["max_profit_lock_level"],
-                    2,
-                )
+                trade["max_profit_lock_level"] = max(trade["max_profit_lock_level"], 2)
 
                 print("=" * 50)
                 print("TP3 HIT")
@@ -428,10 +593,7 @@ class Backtester:
                 trade["breakeven_time"] = candle["time"]
                 trade["tp1_hit"] = True
                 trade["tp1_time"] = candle["time"]
-                trade["max_profit_lock_level"] = max(
-                    trade["max_profit_lock_level"],
-                    0,
-                )
+                trade["max_profit_lock_level"] = max(trade["max_profit_lock_level"], 0)
 
                 print("=" * 50)
                 print("TP1 HIT")
@@ -443,10 +605,7 @@ class Backtester:
                 trade["stop_loss"] = tp1
                 trade["tp2_hit"] = True
                 trade["tp2_time"] = candle["time"]
-                trade["max_profit_lock_level"] = max(
-                    trade["max_profit_lock_level"],
-                    1,
-                )
+                trade["max_profit_lock_level"] = max(trade["max_profit_lock_level"], 1)
 
                 print("=" * 50)
                 print("TP2 HIT")
@@ -458,10 +617,7 @@ class Backtester:
                 trade["stop_loss"] = tp2
                 trade["tp3_hit"] = True
                 trade["tp3_time"] = candle["time"]
-                trade["max_profit_lock_level"] = max(
-                    trade["max_profit_lock_level"],
-                    2,
-                )
+                trade["max_profit_lock_level"] = max(trade["max_profit_lock_level"], 2)
 
                 print("=" * 50)
                 print("TP3 HIT")
@@ -536,7 +692,7 @@ class Backtester:
         trade["balance_before"] = old_balance
         trade["balance_after"] = self.balance
 
-        self.trades.append(trade)
+        self._append_trade_to_csv(trade)
 
         if result_percent > 0:
             print("\nПРИБЫЛЬ:")
@@ -562,32 +718,3 @@ class Backtester:
         print(f"reason={reason}")
 
         self.open_trade = None
-
-    def export_trades_csv(self):
-        results_dir = Path("results")
-        results_dir.mkdir(exist_ok=True)
-
-        file_path = results_dir / "trades.csv"
-
-        if not self.trades:
-            return
-
-        fieldnames = list(self.trades[0].keys())
-
-        with open(
-            file_path,
-            "w",
-            newline="",
-            encoding="utf-8",
-        ) as csvfile:
-            writer = csv.DictWriter(
-                csvfile,
-                fieldnames=fieldnames,
-            )
-
-            writer.writeheader()
-
-            for trade in self.trades:
-                writer.writerow(trade)
-
-        print(f"\nTrades exported: {file_path}")
