@@ -1,6 +1,6 @@
 {
   "initial_balance": 1000,
-  "risk_percent": 1.0,
+  "risk_percent": 1,
 
   "spread": 0.3,
   "slippage": 0.1,
@@ -8,5 +8,6 @@
   "print_trades": true,
 
   "start_date": "2024-05-01",
-  "end_date": "2026-05-31"
+  "end_date": "2026-05-31",
+  "breakeven_offset": 0.10
 }

@@ -6,7 +6,7 @@ import MetaTrader5 as mt5
 import pandas as pd
 
 
-SYMBOL = "XAUUSD"
+SYMBOL = "GBPUSD"
 
 TIMEFRAMES = {
     "M15": mt5.TIMEFRAME_M15,

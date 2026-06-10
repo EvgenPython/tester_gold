@@ -352,9 +352,9 @@ class Backtester:
         return False
 
     def _stop_distance_filter_blocks_signal(
-        self,
-        signal,
-        h1_past,
+            self,
+            signal,
+            h1_past,
     ) -> bool:
         entry_price = float(signal.entry_price)
         stop_loss = float(signal.stop_loss)
@@ -374,6 +374,21 @@ class Backtester:
             print(f"stop_distance: {stop_distance:.2f}")
             print(f"min_stop_distance: {min_stop_distance:.2f}")
             print(f"atr: {atr:.2f}")
+            return True
+
+        max_stop_atr = 2.0
+        max_stop_distance = atr * max_stop_atr
+
+        if stop_distance > max_stop_distance:
+            print("=" * 50)
+            print("STOP DISTANCE FILTER BLOCKED TRADE - TOO FAR")
+            print(f"direction: {signal.action.value}")
+            print(f"entry: {entry_price}")
+            print(f"stop_loss: {stop_loss}")
+            print(f"stop_distance: {stop_distance:.2f}")
+            print(f"max_stop_distance: {max_stop_distance:.2f}")
+            print(f"atr: {atr:.2f}")
+            print(f"stop/atr: {stop_distance / atr:.2f}")
             return True
 
         return False
@@ -528,7 +543,8 @@ class Backtester:
                 return
 
             if high >= tp1 and not trade["tp1_hit"]:
-                trade["stop_loss"] = trade["entry_price"]
+                breakeven_offset = self.backtest_settings.get("breakeven_offset", 0)
+                trade["stop_loss"] = trade["entry_price"] + breakeven_offset
                 trade["breakeven_active"] = True
                 trade["breakeven_time"] = candle["time"]
                 trade["tp1_hit"] = True
@@ -588,7 +604,8 @@ class Backtester:
                 return
 
             if low <= tp1 and not trade["tp1_hit"]:
-                trade["stop_loss"] = trade["entry_price"]
+                breakeven_offset = self.backtest_settings.get("breakeven_offset", 0)
+                trade["stop_loss"] = trade["entry_price"] - breakeven_offset
                 trade["breakeven_active"] = True
                 trade["breakeven_time"] = candle["time"]
                 trade["tp1_hit"] = True
