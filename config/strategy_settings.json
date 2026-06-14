@@ -15,7 +15,8 @@
   },
 
   "scoring": {
-    "min_score": 75
+    "min_score": 75,
+    "max_score": 90
   },
 
   "filters": {
@@ -27,5 +28,10 @@
     "tp1_rr": 1.0,
     "tp2_rr": 2.0,
     "tp3_rr": 3.0
+  },
+
+  "risk_limits": {
+    "daily_soft_stop_percent": 3.0,
+    "daily_hard_stop_percent": 4.0
   }
 }

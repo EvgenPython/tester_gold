@@ -48,6 +48,9 @@ class Backtester:
         "max_profit_lock_level",
         "candles_in_trade",
 
+        "daily_drawdown_percent",
+        "daily_guard_reason",
+
         "close_time",
         "close_price",
         "close_reason",
@@ -68,6 +71,7 @@ class Backtester:
         "score",
         "max_profit_lock_level",
         "candles_in_trade",
+        "daily_drawdown_percent",
         "close_price",
         "rr",
         "result_percent",
@@ -114,6 +118,20 @@ class Backtester:
 
         self.results_dir = Path(__file__).resolve().parent.parent / "results"
         self.trades_file_path = self.results_dir / "trades.csv"
+
+        risk_limits = self.strategy_settings.get("risk_limits", {})
+        self.daily_soft_stop_percent = float(
+            risk_limits.get("daily_soft_stop_percent", 3.0)
+        )
+        self.daily_hard_stop_percent = float(
+            risk_limits.get("daily_hard_stop_percent", 4.0)
+        )
+
+        self.current_day = None
+        self.day_start_equity = self.balance
+        self.trading_disabled_today = False
+        self.daily_soft_stop_hits = 0
+        self.daily_hard_stop_hits = 0
 
         self._init_trades_csv()
 
@@ -212,6 +230,8 @@ class Backtester:
 
     def run(self):
         print("\nBACKTEST STARTED\n")
+        print(f"Daily soft stop: {self.daily_soft_stop_percent:.2f}%")
+        print(f"Daily hard stop: {self.daily_hard_stop_percent:.2f}%")
 
         for i in range(300, len(self.m15)):
             current_m15 = self.m15.iloc[i]
@@ -230,11 +250,42 @@ class Backtester:
             if len(m15_past) < 250:
                 continue
 
+            self._update_daily_guard_day(candle=current_m15)
+
             if self.open_trade is not None:
                 self.manage_trade(
                     candle=current_m15,
                     m15_past=m15_past,
                 )
+                continue
+
+            # Если в течение этого дня уже был hard/soft stop,
+            # до следующего календарного дня новые сделки не открываем.
+            if self.trading_disabled_today:
+                continue
+
+            # Если после уже закрытых сделок дневная просадка достигла soft/hard stop,
+            # новые сделки сегодня не открываем.
+            if self._daily_hard_stop_is_hit_by_equity(self.balance):
+                self.daily_hard_stop_hits += 1
+                self.trading_disabled_today = True
+                print("=" * 50)
+                print("DAILY HARD STOP HIT - TRADING DISABLED UNTIL NEXT DAY")
+                print(f"time: {current_time}")
+                print(f"day_start_equity: {self.day_start_equity:.2f}")
+                print(f"current_equity: {self.balance:.2f}")
+                print(f"daily_drawdown: {self._calculate_daily_drawdown_from_equity(self.balance):.2f}%")
+                continue
+
+            if self._daily_soft_stop_is_hit_by_equity(self.balance):
+                self.daily_soft_stop_hits += 1
+                self.trading_disabled_today = True
+                print("=" * 50)
+                print("DAILY SOFT STOP HIT - NEW TRADES DISABLED UNTIL NEXT DAY")
+                print(f"time: {current_time}")
+                print(f"day_start_equity: {self.day_start_equity:.2f}")
+                print(f"current_equity: {self.balance:.2f}")
+                print(f"daily_drawdown: {self._calculate_daily_drawdown_from_equity(self.balance):.2f}%")
                 continue
 
             signal = generate_signal(
@@ -291,8 +342,164 @@ class Backtester:
         print(f"Blocked by liquidity filter: {self.blocked_by_liquidity}")
         print(f"Blocked by stop distance filter: {self.blocked_by_stop_distance}")
         print(f"Blocked by max score filter: {self.blocked_by_max_score}")
+        print(f"Daily soft stop hits: {self.daily_soft_stop_hits}")
+        print(f"Daily hard stop hits: {self.daily_hard_stop_hits}")
         print(f"Trades exported: {self.trade_count}")
         print(f"Trades CSV path: {self.trades_file_path}")
+
+    def _update_daily_guard_day(self, candle):
+        candle_day = candle["time"].date()
+
+        if self.current_day == candle_day:
+            return
+
+        self.current_day = candle_day
+        self.day_start_equity = self._calculate_equity(candle["close"])
+        self.trading_disabled_today = False
+
+        print("=" * 50)
+        print("NEW TRADING DAY")
+        print(f"date: {self.current_day}")
+        print(f"day_start_equity: {self.day_start_equity:.2f}")
+
+    def _calculate_equity(self, current_price: float) -> float:
+        if self.open_trade is None:
+            return self.balance
+
+        trade = self.open_trade
+
+        floating_rr = calculate_rr(
+            direction=trade["direction"],
+            entry_price=trade["entry_price"],
+            close_price=current_price,
+            stop_loss=trade["initial_stop_loss"],
+        )
+
+        floating_percent = calculate_result_percent(
+            rr=floating_rr,
+            risk_percent=trade["risk_percent"],
+        )
+
+        return self.balance * (1 + floating_percent / 100)
+
+    def _calculate_daily_drawdown_from_equity(self, equity: float) -> float:
+        """
+        Дневная просадка считается НЕ как сумма минусовых сделок.
+        Считается общая просадка текущего equity/balance относительно equity на начало дня.
+
+        Пример:
+        день стартовал с 1000
+        +1%, +2%, потом -3%
+        если текущий equity около старта дня или выше — daily_dd = 0, а не 3.
+        """
+        if self.day_start_equity <= 0:
+            return 0.0
+
+        daily_drawdown_percent = (
+            (self.day_start_equity - equity)
+            / self.day_start_equity
+        ) * 100
+
+        return max(0.0, daily_drawdown_percent)
+
+    def _calculate_daily_drawdown_percent(self, current_price: float) -> float:
+        current_equity = self._calculate_equity(current_price)
+        return self._calculate_daily_drawdown_from_equity(current_equity)
+
+    def _daily_soft_stop_is_hit_by_equity(self, equity: float) -> bool:
+        daily_drawdown_percent = self._calculate_daily_drawdown_from_equity(equity)
+        return daily_drawdown_percent >= self.daily_soft_stop_percent
+
+    def _daily_hard_stop_is_hit_by_equity(self, equity: float) -> bool:
+        daily_drawdown_percent = self._calculate_daily_drawdown_from_equity(equity)
+        return daily_drawdown_percent >= self.daily_hard_stop_percent
+
+    def _daily_soft_stop_is_hit(self, candle) -> bool:
+        daily_drawdown_percent = self._calculate_daily_drawdown_percent(candle["close"])
+        return daily_drawdown_percent >= self.daily_soft_stop_percent
+
+    def _daily_hard_stop_is_hit(self, candle) -> bool:
+        daily_drawdown_percent = self._calculate_daily_drawdown_percent(candle["close"])
+        return daily_drawdown_percent >= self.daily_hard_stop_percent
+
+    def _get_daily_hard_stop_price(self):
+        """
+        Цена, при которой equity достигает дневного hard stop.
+        Нужна для корректного закрытия открытой сделки не по close свечи,
+        а примерно в точке достижения дневного лимита.
+        """
+        if self.open_trade is None:
+            return None
+
+        if self.day_start_equity <= 0 or self.balance <= 0:
+            return None
+
+        trade = self.open_trade
+        risk_percent = float(trade["risk_percent"])
+
+        if risk_percent <= 0:
+            return None
+
+        target_equity = self.day_start_equity * (1 - self.daily_hard_stop_percent / 100)
+
+        # Если текущий balance уже ниже hard stop без открытой сделки,
+        # цена не нужна: торговлю просто блокируем до следующего дня.
+        target_result_percent = ((target_equity / self.balance) - 1) * 100
+        target_rr = target_result_percent / risk_percent
+
+        initial_risk = abs(trade["entry_price"] - trade["initial_stop_loss"])
+
+        if initial_risk <= 0:
+            return None
+
+        if trade["direction"] == "BUY":
+            return trade["entry_price"] + target_rr * initial_risk
+
+        if trade["direction"] == "SELL":
+            return trade["entry_price"] - target_rr * initial_risk
+
+        return None
+
+    def _hard_stop_price_was_reached(self, candle) -> bool:
+        if self.open_trade is None:
+            return False
+
+        hard_stop_price = self._get_daily_hard_stop_price()
+
+        if hard_stop_price is None:
+            return False
+
+        direction = self.open_trade["direction"]
+
+        if direction == "BUY":
+            return candle["low"] <= hard_stop_price
+
+        if direction == "SELL":
+            return candle["high"] >= hard_stop_price
+
+        return False
+
+    def _close_by_daily_hard_stop(self, candle):
+        hard_stop_price = self._get_daily_hard_stop_price()
+
+        if hard_stop_price is None:
+            hard_stop_price = candle["close"]
+
+        self.daily_hard_stop_hits += 1
+        self.trading_disabled_today = True
+
+        print("=" * 50)
+        print("DAILY HARD STOP HIT - POSITION CLOSED AND TRADING DISABLED UNTIL NEXT DAY")
+        print(f"time: {candle['time']}")
+        print(f"day_start_equity: {self.day_start_equity:.2f}")
+        print(f"hard_stop_price: {hard_stop_price:.2f}")
+
+        self.close_trade(
+            close_price=hard_stop_price,
+            reason="DAILY HARD STOP",
+            candle=candle,
+            daily_guard_reason="DAILY HARD STOP",
+        )
 
     def _liquidity_filter_blocks_signal(
         self,
@@ -511,6 +718,7 @@ class Backtester:
 
         return True
 
+
     def manage_trade(
         self,
         candle,
@@ -534,12 +742,21 @@ class Backtester:
         tp3 = trade["tp3"]
 
         if direction == "BUY":
+            # Если дневной hard stop находится ближе текущего SL,
+            # закрываемся по нему и до следующего дня не торгуем.
+            if self._hard_stop_price_was_reached(candle):
+                hard_stop_price = self._get_daily_hard_stop_price()
+                if hard_stop_price is not None and hard_stop_price > stop_loss:
+                    self._close_by_daily_hard_stop(candle)
+                    return
+
             if low <= stop_loss:
                 self.close_trade(
                     close_price=stop_loss,
                     reason=self._get_stop_close_reason(trade),
                     candle=candle,
                 )
+                self._disable_trading_if_daily_limits_hit_after_close(candle)
                 return
 
             if high >= tp1 and not trade["tp1_hit"]:
@@ -555,7 +772,7 @@ class Backtester:
                 print("TP1 HIT")
                 print(f"time: {candle['time']}")
                 print(f"direction: {direction}")
-                print("SL moved to ENTRY")
+                print("SL moved to BE+")
 
             if high >= tp2 and not trade["tp2_hit"]:
                 trade["stop_loss"] = tp1
@@ -592,15 +809,31 @@ class Backtester:
                     reason="EXIT SIGNAL",
                     candle=candle,
                 )
+                self._disable_trading_if_daily_limits_hit_after_close(candle)
+                return
+
+            # После обработки TP/EXIT проверяем, не достигла ли открытая позиция hard stop по close.
+            # Это страховка на случай гэпа/быстрого движения внутри свечи.
+            if self._daily_hard_stop_is_hit(candle):
+                self._close_by_daily_hard_stop(candle)
                 return
 
         if direction == "SELL":
+            # Если дневной hard stop находится ближе текущего SL,
+            # закрываемся по нему и до следующего дня не торгуем.
+            if self._hard_stop_price_was_reached(candle):
+                hard_stop_price = self._get_daily_hard_stop_price()
+                if hard_stop_price is not None and hard_stop_price < stop_loss:
+                    self._close_by_daily_hard_stop(candle)
+                    return
+
             if high >= stop_loss:
                 self.close_trade(
                     close_price=stop_loss,
                     reason=self._get_stop_close_reason(trade),
                     candle=candle,
                 )
+                self._disable_trading_if_daily_limits_hit_after_close(candle)
                 return
 
             if low <= tp1 and not trade["tp1_hit"]:
@@ -616,7 +849,7 @@ class Backtester:
                 print("TP1 HIT")
                 print(f"time: {candle['time']}")
                 print(f"direction: {direction}")
-                print("SL moved to ENTRY")
+                print("SL moved to BE+")
 
             if low <= tp2 and not trade["tp2_hit"]:
                 trade["stop_loss"] = tp1
@@ -653,7 +886,41 @@ class Backtester:
                     reason="EXIT SIGNAL",
                     candle=candle,
                 )
+                self._disable_trading_if_daily_limits_hit_after_close(candle)
                 return
+
+            # После обработки TP/EXIT проверяем, не достигла ли открытая позиция hard stop по close.
+            if self._daily_hard_stop_is_hit(candle):
+                self._close_by_daily_hard_stop(candle)
+                return
+
+    def _disable_trading_if_daily_limits_hit_after_close(self, candle):
+        """
+        После закрытия сделки смотрим общий дневной результат относительно старта дня.
+        Если достигли soft/hard stop — больше сегодня не открываем сделки.
+        """
+        daily_dd = self._calculate_daily_drawdown_from_equity(self.balance)
+
+        if daily_dd >= self.daily_hard_stop_percent:
+            self.daily_hard_stop_hits += 1
+            self.trading_disabled_today = True
+            print("=" * 50)
+            print("DAILY HARD STOP HIT AFTER CLOSE - TRADING DISABLED UNTIL NEXT DAY")
+            print(f"time: {candle['time']}")
+            print(f"day_start_equity: {self.day_start_equity:.2f}")
+            print(f"balance: {self.balance:.2f}")
+            print(f"daily_drawdown: {daily_dd:.2f}%")
+            return
+
+        if daily_dd >= self.daily_soft_stop_percent:
+            self.daily_soft_stop_hits += 1
+            self.trading_disabled_today = True
+            print("=" * 50)
+            print("DAILY SOFT STOP HIT AFTER CLOSE - NEW TRADES DISABLED UNTIL NEXT DAY")
+            print(f"time: {candle['time']}")
+            print(f"day_start_equity: {self.day_start_equity:.2f}")
+            print(f"balance: {self.balance:.2f}")
+            print(f"daily_drawdown: {daily_dd:.2f}%")
 
     def _get_stop_close_reason(
         self,
@@ -675,6 +942,7 @@ class Backtester:
         close_price,
         reason,
         candle,
+        daily_guard_reason=None,
     ):
         trade = self.open_trade
 
@@ -700,6 +968,13 @@ class Backtester:
 
         if drawdown > self.max_drawdown:
             self.max_drawdown = drawdown
+
+        # ВАЖНО:
+        # После закрытия сделки daily_dd считаем от нового balance.
+        # Нельзя вызывать _calculate_daily_drawdown_percent(close_price),
+        # потому что open_trade ещё существует и сделка будет учтена второй раз.
+        trade["daily_drawdown_percent"] = self._calculate_daily_drawdown_from_equity(self.balance)
+        trade["daily_guard_reason"] = daily_guard_reason
 
         trade["close_time"] = candle["time"]
         trade["close_price"] = close_price
@@ -732,6 +1007,7 @@ class Backtester:
             print("result=0.00%")
 
         print(f"balance={self.balance:.2f}")
+        print(f"daily_dd={trade['daily_drawdown_percent']:.2f}%")
         print(f"reason={reason}")
 
         self.open_trade = None
